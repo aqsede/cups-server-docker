@@ -1,0 +1,30 @@
+services:
+  cups:
+    build: .
+    image: cups-ipp-usb:local
+    container_name: cups_server
+    restart: unless-stopped
+
+    # Host networking is required so avahi/CUPS can advertise the shared
+    # printer via mDNS/Bonjour on your actual LAN, not an isolated docker
+    # bridge network.
+    network_mode: host
+
+    # Give the container access to the USB bus without full --privileged.
+    # 189 is the Linux "usb" device major number.
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    device_cgroup_rules:
+      - 'c 189:* rmw'
+
+    environment:
+      - CUPS_ADMIN_USER=admin
+      - CUPS_ADMIN_PASSWORD=change_me_please   # <-- change this
+      - TZ=Asia/Kuala_Lumpur
+
+    volumes:
+      - ./data/cups-config:/etc/cups
+      - ./data/cups-spool:/var/spool/cups
+      - ./data/cups-log:/var/log/cups
+      - ./data/ipp-usb-conf:/etc/ipp-usb
+      - ./data/ipp-usb-state:/var/ipp-usb
