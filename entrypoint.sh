@@ -54,9 +54,16 @@ ipp-usb status || echo "[entrypoint] (no device detected yet - check that the pr
 # inside Docker containers (see moby/moby#35359, libusb/libusb#559) - the
 # container has no working udev socket for it to listen on. Without this,
 # ipp-usb can be left "blind" after an unplug/replug until something
-# restarts it. This loop polls cheaply for a change in the number of
-# attached USB printer-class interfaces and restarts only the ipp-usb
-# process (not the whole container) when it changes.
+# restarts it.
+#
+# This checks, every cycle, whether what ipp-usb currently reports matches
+# what the kernel actually sees - not just whether something changed since
+# last time. That distinction matters: a restart can itself race with the
+# kernel still releasing the old process's USB claim and silently come up
+# empty, and a purely edge-triggered check would then lock in that wrong
+# state until another physical unplug/replug. Checking on every cycle
+# means a failed attempt just gets retried on the next one instead of
+# getting stuck.
 #
 # Set WATCHDOG_INTERVAL=0 to disable this entirely if you'd rather not
 # have the periodic wakeup at all.
@@ -66,18 +73,25 @@ usb_printer_count() {
   grep -l '^07$' /sys/bus/usb/devices/*/bInterfaceClass 2>/dev/null | wc -l
 }
 
+ipp_usb_reported_count() {
+  ipp-usb status 2>/dev/null | grep -cE '^\s*[0-9]+\.\s'
+}
+
+restart_ipp_usb() {
+  pkill -f "ipp-usb standalone" 2>/dev/null || true
+  sleep 2
+  ipp-usb standalone &
+}
+
 if [ "$WATCHDOG_INTERVAL" -gt 0 ]; then
   (
-    last_count=$(usb_printer_count)
     while true; do
       sleep "$WATCHDOG_INTERVAL"
-      current_count=$(usb_printer_count)
-      if [ "$current_count" != "$last_count" ]; then
-        echo "[watchdog] USB printer interface count changed ($last_count -> $current_count), restarting ipp-usb"
-        pkill -f "ipp-usb standalone" 2>/dev/null || true
-        sleep 1
-        ipp-usb standalone &
-        last_count="$current_count"
+      kernel_count=$(usb_printer_count)
+      reported_count=$(ipp_usb_reported_count)
+      if [ "$kernel_count" != "$reported_count" ]; then
+        echo "[watchdog] mismatch: kernel sees $kernel_count printer-class interface(s), ipp-usb reports $reported_count - restarting ipp-usb"
+        restart_ipp_usb
       fi
     done
   ) &

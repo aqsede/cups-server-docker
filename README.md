@@ -183,11 +183,15 @@ something restarts it.
 
 This image works around it with a small watchdog loop in
 `entrypoint.sh`: every `WATCHDOG_INTERVAL` seconds (default `20`, set via
-`.env`) it does a cheap check of how
-many USB printer-class interfaces are currently present
-(`/sys/bus/usb/devices/*/bInterfaceClass == 07`). If that count changes
-— printer removed or (re)added — it restarts just the `ipp-usb` process,
-not the whole container.
+`.env`) it compares what `ipp-usb` currently reports against what the
+kernel actually sees attached (`/sys/bus/usb/devices/*/bInterfaceClass ==
+07`). If they disagree, it restarts just the `ipp-usb` process, not the
+whole container. Checking on every cycle - rather than only reacting once
+to a plug/unplug event - matters because a restart can itself race with
+the kernel still releasing the previous process's USB claim and come up
+empty; an edge-triggered check would then lock in that wrong state until
+another physical unplug/replug, whereas checking every cycle means a
+failed attempt just gets retried on the next one.
 
 Trade-off, stated plainly: this adds one small periodic CPU wakeup every
 `WATCHDOG_INTERVAL` seconds, forever, in exchange for the printer working
