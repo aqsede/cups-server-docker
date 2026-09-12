@@ -160,3 +160,66 @@ this for a different model:
 - OpenMediaVault (Debian 12 / Bookworm)
 - Brother DCP-T220 (USB, vendor:product `04f9:0474`)
 - Docker Compose v2, single-host deployment (not Swarm)
+
+## Hotplug reliability (unplug/replug without restarting the container)
+
+`ipp-usb` normally relies on `libusb`'s udev-based hotplug notifications
+to notice a device being unplugged and replugged. **That notification
+path is known to be unreliable inside Docker containers** — it's a
+long-standing, well-documented limitation (see upstream reports at
+`moby/moby#35359` and `libusb/libusb#559`), not something specific to
+this setup. Containers don't get a working udev socket the way the host
+does, so `ipp-usb` can be left "blind" to the printer coming back until
+something restarts it.
+
+This image works around it with a small watchdog loop in
+`entrypoint.sh`: every `WATCHDOG_INTERVAL` seconds (default `20`, set via
+the environment in `docker-compose.yml`) it does a cheap check of how
+many USB printer-class interfaces are currently present
+(`/sys/bus/usb/devices/*/bInterfaceClass == 07`). If that count changes
+— printer removed or (re)added — it restarts just the `ipp-usb` process,
+not the whole container.
+
+Trade-off, stated plainly: this adds one small periodic CPU wakeup every
+`WATCHDOG_INTERVAL` seconds, forever, in exchange for the printer working
+again within ~20s of being replugged instead of requiring a manual
+`docker compose restart`. If you'd rather not pay that (e.g. the printer
+is permanently plugged in and never removed), set
+`WATCHDOG_INTERVAL=0` to disable the loop entirely.
+
+## Power consumption notes
+
+- **The CUPS/ipp-usb/avahi/dbus processes are idle, event-driven daemons**
+  — near-zero CPU when nothing is printing, tens of MB of RAM. On an N100
+  already running many containers, this isn't independently measurable
+  against your baseline.
+- **mDNS/Bonjour announcements are not continuous.** Re-announcements
+  happen roughly every half the record's TTL (tens of minutes), not every
+  second — it's push-based, not a polling loop.
+- **Logs are mounted as `tmpfs` (RAM), not bind-mounted to disk.** CUPS's
+  `AccessLog`/`PageLog` are also disabled outright (only real errors are
+  kept). Combined, routine operation should never trigger a disk
+  spin-up/D3 exit purely for logging. If you want `ipp-usb`'s own log
+  verbosity turned down too (it's fairly chatty at the default `debug`
+  level, though it only writes when there's actual print/scan traffic),
+  edit `./data/ipp-usb-conf/ipp-usb.conf` on the host:
+
+  ```ini
+  [logging]
+  device-log    = error
+  main-log      = error
+  console-log   = error
+  max-file-size = 64K
+  max-backup-files = 1
+  ```
+
+  then `docker compose restart`.
+- **The one real, if modest, power cost is leaving the printer physically
+  powered on 24/7** so `ipp-usb` can always see it — that's the printer's
+  own idle draw (typically 1-2W for a small inkjet), independent of the
+  container. A held-open USB session can also prevent USB autosuspend and
+  block the host's deepest CPU/platform idle states to some degree; if you
+  want to know how much that actually matters on your specific N100,
+  compare `sudo powertop`'s package C-state residency with the printer
+  plugged in vs. unplugged rather than taking an estimate — it varies
+  enough by platform that a real measurement beats a guess.
