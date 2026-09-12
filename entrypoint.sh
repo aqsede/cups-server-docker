@@ -37,10 +37,10 @@ usermod -aG lpadmin "$CUPS_ADMIN_USER"
 # --- D-Bus (required by avahi-daemon) -------------------------------------
 mkdir -p /run/dbus
 rm -f /run/dbus/pid
-dbus-daemon --system --fork
+dbus-daemon --system --fork || echo "[entrypoint] WARNING: dbus-daemon failed to start"
 
 # --- Avahi: advertises the shared printer over mDNS/Bonjour on your LAN --
-avahi-daemon --daemonize --no-chroot
+avahi-daemon --daemonize --no-chroot || echo "[entrypoint] WARNING: avahi-daemon failed to start"
 
 # --- ipp-usb: bridges the USB-connected Brother T220 to a local IPP endpoint
 ipp-usb standalone &
@@ -76,11 +76,12 @@ usb_printer_count() {
   # interfaces would therefore never match ipp-usb's own per-device
   # count, so we dedupe by the physical device's bus-port path
   # (the part before the ":" in e.g. "3-1:1.0") instead.
-  local f dev
+  local f dev class
   declare -A seen=()
   for f in /sys/bus/usb/devices/*/bInterfaceClass; do
     [ -r "$f" ] || continue
-    if [ "$(cat "$f" 2>/dev/null)" = "07" ]; then
+    class="$(cat "$f" 2>/dev/null || true)"
+    if [ "$class" = "07" ]; then
       dev="${f#/sys/bus/usb/devices/}"
       dev="${dev%%:*}"
       seen["$dev"]=1
@@ -90,7 +91,7 @@ usb_printer_count() {
 }
 
 ipp_usb_reported_count() {
-  ipp-usb status 2>/dev/null | grep -cE '^\s*[0-9]+\.\s'
+  ipp-usb status 2>/dev/null | grep -cE '^\s*[0-9]+\.\s' || true
 }
 
 restart_ipp_usb() {
