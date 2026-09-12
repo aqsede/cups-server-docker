@@ -24,8 +24,17 @@ involved.
 - `cupsd.conf` — CUPS config: LAN admin access, sharing/mDNS enabled
 - `entrypoint.sh` — seeds config on first run, starts dbus/avahi/ipp-usb/cupsd
 - `docker-compose.yml` — the stack file
+- `.gitignore` — keeps `.env` and the `data/` runtime state out of git
 
 ## Setup
+
+### 0. Set your own credentials
+
+```bash
+nano .env   # set CUPS_ADMIN_PASSWORD, TZ, etc.
+```
+
+`docker-compose.yml` should reads from it automatically.
 
 ### 1. Plug in the printer
 Connect it via USB and power it on. Confirm the host sees it:
@@ -138,8 +147,8 @@ this for a different model:
 
 ## Notes & things worth knowing
 
-- **Change `CUPS_ADMIN_PASSWORD`** in `docker-compose.yml` before you
-  deploy — it defaults to something trivial.
+- **Set a real `CUPS_ADMIN_PASSWORD` in `.env`** before you deploy — the
+  current .env file ships with a trivial placeholder.
 - **`network_mode: host`** is required for mDNS/Bonjour discovery to
   reach your real LAN (containers on the default bridge network can't
   send/receive multicast). This means port `631` binds directly on the
@@ -174,7 +183,7 @@ something restarts it.
 
 This image works around it with a small watchdog loop in
 `entrypoint.sh`: every `WATCHDOG_INTERVAL` seconds (default `20`, set via
-the environment in `docker-compose.yml`) it does a cheap check of how
+`.env`) it does a cheap check of how
 many USB printer-class interfaces are currently present
 (`/sys/bus/usb/devices/*/bInterfaceClass == 07`). If that count changes
 — printer removed or (re)added — it restarts just the `ipp-usb` process,

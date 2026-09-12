@@ -1,0 +1,5 @@
+# Real environment file - contains your admin password, never commit this
+.env
+
+# Runtime state (CUPS config, spool, ipp-usb state) - host-specific, not repo content
+data/

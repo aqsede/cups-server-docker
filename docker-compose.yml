@@ -18,10 +18,10 @@ services:
       - 'c 189:* rmw'
 
     environment:
-      - CUPS_ADMIN_USER=admin
-      - CUPS_ADMIN_PASSWORD=change_me_please   # <-- change this
-      - TZ=Asia/Kuala_Lumpur
-      - WATCHDOG_INTERVAL=20   # seconds between hotplug checks; 0 disables it
+      - CUPS_ADMIN_USER=${CUPS_ADMIN_USER:-admin}
+      - CUPS_ADMIN_PASSWORD=${CUPS_ADMIN_PASSWORD:-change_me_please}
+      - TZ=${TZ:-UTC}
+      - WATCHDOG_INTERVAL=${WATCHDOG_INTERVAL:-20}
 
     volumes:
       - ./data/cups-config:/etc/cups
