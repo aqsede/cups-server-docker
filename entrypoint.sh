@@ -70,7 +70,23 @@ ipp-usb status || echo "[entrypoint] (no device detected yet - check that the pr
 WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-20}"
 
 usb_printer_count() {
-  grep -l '^07$' /sys/bus/usb/devices/*/bInterfaceClass 2>/dev/null | wc -l
+  # IPP-over-USB printers commonly expose *two* printer-class (07)
+  # interfaces on the same physical device - one legacy USB-printing
+  # interface, one dedicated IPP-over-USB interface. Counting raw
+  # interfaces would therefore never match ipp-usb's own per-device
+  # count, so we dedupe by the physical device's bus-port path
+  # (the part before the ":" in e.g. "3-1:1.0") instead.
+  local f dev
+  declare -A seen=()
+  for f in /sys/bus/usb/devices/*/bInterfaceClass; do
+    [ -r "$f" ] || continue
+    if [ "$(cat "$f" 2>/dev/null)" = "07" ]; then
+      dev="${f#/sys/bus/usb/devices/}"
+      dev="${dev%%:*}"
+      seen["$dev"]=1
+    fi
+  done
+  echo "${#seen[@]}"
 }
 
 ipp_usb_reported_count() {
