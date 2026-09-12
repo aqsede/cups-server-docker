@@ -196,6 +196,48 @@ again within ~20s of being replugged instead of requiring a manual
 is permanently plugged in and never removed), set
 `WATCHDOG_INTERVAL=0` to disable the loop entirely.
 
+## Putting the admin web UI behind Nginx Proxy Manager (LAN-only)
+
+This gives you `https://cups.yourdomain.lan` instead of
+`http://<nas-ip>:631` — cosmetic and a bit more secure (real TLS instead
+of CUPS's self-signed cert warning), with **no effect on printing itself**.
+mDNS discovery and actual IPP traffic go directly LAN-device → CUPS over
+the real IP; NPM never sits in that path.
+
+1. **Local DNS.** NPM doesn't provide DNS — something on your network
+   needs to resolve `cups.yourdomain.lan` to NPM's IP (router's local DNS,
+   Pi-hole, or a `/etc/hosts` entry per device). If you want a real,
+   browser-trusted certificate rather than a self-signed one, use a domain
+   you actually own with a DNS-01 challenge in NPM (Let's Encrypt can
+   issue a cert for a name that only resolves internally, as long as you
+   can prove ownership via a public DNS TXT record) — otherwise NPM's
+   self-signed option works fine for a personal LAN page, just with a
+   one-time browser warning to click through.
+
+2. **In CUPS**, edit `cupsd.conf` and add your actual domain to
+   `ServerAlias` (see the line already in this repo's `cupsd.conf` —
+   replace `cups.example.lan` with your real one). If you already
+   deployed before this change, edit the live copy at
+   `./data/cups-config/cupsd.conf` on the host directly, then:
+   ```bash
+   docker compose restart
+   ```
+
+3. **In NPM**, add a new Proxy Host:
+   - Domain Names: `cups.yourdomain.lan`
+   - Scheme: `http`
+   - Forward Hostname/IP: your NAS's real LAN IP (not `localhost`/`127.0.0.1`
+     — CUPS is bound via `network_mode: host`, so it's reachable directly
+     at the NAS's own address regardless of where NPM itself runs)
+   - Forward Port: `631`
+   - SSL tab: request/select your certificate, enable **Force SSL**
+
+4. **Test:** visit `https://cups.yourdomain.lan`, log in with your admin
+   credentials, and try an actual admin action (not just loading the
+   page) — e.g. toggling a printer's shared state. If `ServerAlias` isn't
+   set correctly you'll see a `400 Bad Request` rather than a login
+   prompt, which is the tell that step 2 needs another look.
+
 ## Power consumption notes
 
 - **The CUPS/ipp-usb/avahi/dbus processes are idle, event-driven daemons**
