@@ -12,8 +12,6 @@ services:
 
     # Give the container access to the USB bus without full --privileged.
     # 189 is the Linux "usb" device major number.
-    devices:
-      - /dev/bus/usb:/dev/bus/usb
     device_cgroup_rules:
       - 'c 189:* rmw'
 
@@ -24,6 +22,7 @@ services:
       - WATCHDOG_INTERVAL=${WATCHDOG_INTERVAL:-20}
 
     volumes:
+      - /dev/bus/usb:/dev/bus/usb
       - ./data/cups-config:/etc/cups
       - ./data/cups-spool:/var/spool/cups
       - ./data/ipp-usb-conf:/etc/ipp-usb
