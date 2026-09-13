@@ -95,7 +95,12 @@ ipp_usb_reported_count() {
 }
 
 restart_ipp_usb() {
-  pkill -f "ipp-usb standalone" 2>/dev/null || true
+  # Plain SIGTERM (pkill's default) has been observed to not reliably
+  # terminate ipp-usb - a stuck process can survive many repeated attempts
+  # (confirmed: same PID persisting for 7+ hours across dozens of restart
+  # attempts). SIGKILL cannot be caught, blocked, or hung on by the
+  # target, so it's used here deliberately instead of a graceful signal.
+  pkill -9 -f "ipp-usb standalone" 2>/dev/null || true
   sleep 2
   ipp-usb standalone &
 }
