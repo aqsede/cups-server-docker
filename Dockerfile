@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         avahi-utils \
         dbus \
         usbutils \
+        inotify-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Our own cupsd.conf: listens on all interfaces, allows LAN admin access,

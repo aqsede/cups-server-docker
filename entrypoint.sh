@@ -42,87 +42,30 @@ dbus-daemon --system --fork || echo "[entrypoint] WARNING: dbus-daemon failed to
 # --- Avahi: advertises the shared printer over mDNS/Bonjour on your LAN --
 avahi-daemon --daemonize --no-chroot || echo "[entrypoint] WARNING: avahi-daemon failed to start"
 
-# --- ipp-usb: bridges the USB-connected Brother T220 to a local IPP endpoint
+# --- ipp-usb: bridges the USB-connected printer to a local IPP endpoint ---
 ipp-usb standalone &
 
 sleep 3
 echo "[entrypoint] ipp-usb device status:"
 ipp-usb status || echo "[entrypoint] (no device detected yet - check that the printer is plugged in and powered on)"
 
-# --- Lightweight USB hotplug watchdog -------------------------------------
-# libusb's udev-based hotplug notifications are known to be unreliable
-# inside Docker containers (see moby/moby#35359, libusb/libusb#559) - the
-# container has no working udev socket for it to listen on. Without this,
-# ipp-usb can be left "blind" after an unplug/replug until something
-# restarts it.
-#
-# This checks, every cycle, whether what ipp-usb currently reports matches
-# what the kernel actually sees - not just whether something changed since
-# last time. That distinction matters: a restart can itself race with the
-# kernel still releasing the old process's USB claim and silently come up
-# empty, and a purely edge-triggered check would then lock in that wrong
-# state until another physical unplug/replug. Checking on every cycle
-# means a failed attempt just gets retried on the next one instead of
-# getting stuck.
-#
-# Set WATCHDOG_INTERVAL=0 to disable this entirely if you'd rather not
-# have the periodic wakeup at all.
-WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-20}"
-
-usb_printer_count() {
-  # IPP-over-USB printers commonly expose *two* printer-class (07)
-  # interfaces on the same physical device - one legacy USB-printing
-  # interface, one dedicated IPP-over-USB interface. Counting raw
-  # interfaces would therefore never match ipp-usb's own per-device
-  # count, so we dedupe by the physical device's bus-port path
-  # (the part before the ":" in e.g. "3-1:1.0") instead.
-  local f dev class
-  declare -A seen=()
-  for f in /sys/bus/usb/devices/*/bInterfaceClass; do
-    [ -r "$f" ] || continue
-    class="$(cat "$f" 2>/dev/null || true)"
-    if [ "$class" = "07" ]; then
-      dev="${f#/sys/bus/usb/devices/}"
-      dev="${dev%%:*}"
-      seen["$dev"]=1
-    fi
-  done
-  echo "${#seen[@]}"
-}
-
-ipp_usb_reported_count() {
-  ipp-usb status 2>/dev/null | grep -cE '^\s*[0-9]+\.\s' || true
-}
-
+# --- Event-driven USB hotplug watchdog (0% CPU idle) -----------------------
 restart_ipp_usb() {
-  # Plain SIGTERM (pkill's default) has been observed to not reliably
-  # terminate ipp-usb - a stuck process can survive many repeated attempts
-  # (confirmed: same PID persisting for 7+ hours across dozens of restart
-  # attempts). SIGKILL cannot be caught, blocked, or hung on by the
-  # target, so it's used here deliberately instead of a graceful signal.
   pkill -9 -f "ipp-usb standalone" 2>/dev/null || true
   sleep 2
   ipp-usb standalone &
 }
 
-if [ "$WATCHDOG_INTERVAL" -gt 0 ]; then
-  (
-    while true; do
-      sleep "$WATCHDOG_INTERVAL"
-      kernel_count=$(usb_printer_count)
-      reported_count=$(ipp_usb_reported_count)
-      if [ "$kernel_count" != "$reported_count" ]; then
-        echo "[watchdog] mismatch: kernel sees $kernel_count printer-class interface(s), ipp-usb reports $reported_count - restarting ipp-usb"
-        restart_ipp_usb
-      fi
-    done
-  ) &
-  echo "[entrypoint] Hotplug watchdog running (checking every ${WATCHDOG_INTERVAL}s)"
-else
-  echo "[entrypoint] Hotplug watchdog disabled (WATCHDOG_INTERVAL=0)"
-fi
+(
+  echo "[entrypoint] Hotplug watchdog running (event-driven via inotify)"
+  # Blocks using zero CPU until a device node is created or deleted in /dev/bus/usb
+  inotifywait -m -e create,delete -r /dev/bus/usb 2>/dev/null | while read -r directory action file; do
+    echo "[watchdog] USB hardware change detected ($action $file) - restarting ipp-usb"
+    sleep 2
+    restart_ipp_usb
+  done
+) &
 
-# --- CUPS runs in the foreground so the container stays up and handles
-#     'docker compose stop' cleanly.
+# --- CUPS runs in the foreground ------------------------------------------
 echo "[entrypoint] Starting cupsd..."
 exec /usr/sbin/cupsd -f

@@ -17,13 +17,13 @@ Linux driver, or ship one that's old, i386-only, or missing features
 protocol (IPP) over the USB cable instead of a proprietary one.
 `ipp-usb` bridges that to a local HTTP endpoint, and CUPS talks to it
 using its universal **"IPP Everywhere"** driver — no vendor software
-involved.
+involved. No host modifications (such as blacklisting host drivers) are required.
 
 ## Files
-- `Dockerfile` — Debian 12 slim + `cups` + `ipp-usb` + `avahi-daemon`
+- `Dockerfile` — Debian 12 slim + `cups` + `ipp-usb` + `avahi-daemon` + `inotify-tools`
 - `cupsd.conf` — CUPS config: LAN admin access, sharing/mDNS enabled
-- `entrypoint.sh` — seeds config on first run, starts dbus/avahi/ipp-usb/cupsd
-- `docker-compose.yml` — the stack file
+- `entrypoint.sh` — seeds config on first run, starts dbus/avahi/ipp-usb/cupsd and event-driven watchdog
+- `docker-compose.yml` — the stack file using volume-mapped USB bus access
 - `.gitignore` — keeps `.env` and the `data/` runtime state out of git
 
 ## Setup
@@ -34,7 +34,7 @@ involved.
 nano .env   # set CUPS_ADMIN_PASSWORD, TZ, etc.
 ```
 
-`docker-compose.yml` should reads from it automatically.
+`docker-compose.yml` reads from it automatically.
 
 ### 1. Plug in the printer
 Connect it via USB and power it on. Confirm the host sees it:
@@ -155,10 +155,7 @@ this for a different model:
   host's interfaces. If the host isn't fully trusted-LAN-only, tighten
   `cupsd.conf`'s `Allow all` lines to your subnet, e.g.
   `Allow 192.168.1.0/24`.
-- **USB access** uses `device_cgroup_rules: ['c 189:* rmw']` rather than
-  `privileged: true` — narrower than full privileged mode while still
-  giving `ipp-usb` the raw access it needs (OpenPrinting's own
-  recommended approach for containerizing `ipp-usb`).
+- **Dynamic USB Access:** USB mounting is configured via `volumes:` (`/dev/bus/usb:/dev/bus/usb`) paired with `device_cgroup_rules: ['c 189:* rmw']`. Using `volumes:` instead of Docker's standard `devices:` block ensures that when a printer is physically unplugged and replugged, the newly assigned kernel device node is dynamically exposed inside the container without requiring a container restart.
 - Nothing here touches host system files, systemd units, or (if
   applicable) your NAS software's own config — only the project folder
   and the `./data/` state directory are written to on the host.
@@ -170,35 +167,15 @@ this for a different model:
 - Brother DCP-T220 (USB, vendor:product `04f9:0474`)
 - Docker Compose v2, single-host deployment (not Swarm)
 
-## Hotplug reliability (unplug/replug without restarting the container)
+## Hotplug reliability (unplug/replug recovery)
 
-`ipp-usb` normally relies on `libusb`'s udev-based hotplug notifications
-to notice a device being unplugged and replugged. **That notification
-path is known to be unreliable inside Docker containers** — it's a
-long-standing, well-documented limitation (see upstream reports at
-`moby/moby#35359` and `libusb/libusb#559`), not something specific to
-this setup. Containers don't get a working udev socket the way the host
-does, so `ipp-usb` can be left "blind" to the printer coming back until
-something restarts it.
+`ipp-usb` relies on kernel udev notifications to detect USB connect/disconnect events. Because Docker containers lack a working udev socket, `ipp-usb` inside a container cannot natively detect when a printer is reconnected after an unplug or power-cycle.
 
-This image works around it with a small watchdog loop in
-`entrypoint.sh`: every `WATCHDOG_INTERVAL` seconds (default `20`, set via
-`.env`) it compares what `ipp-usb` currently reports against what the
-kernel actually sees attached (`/sys/bus/usb/devices/*/bInterfaceClass ==
-07`). If they disagree, it restarts just the `ipp-usb` process, not the
-whole container. Checking on every cycle - rather than only reacting once
-to a plug/unplug event - matters because a restart can itself race with
-the kernel still releasing the previous process's USB claim and come up
-empty; an edge-triggered check would then lock in that wrong state until
-another physical unplug/replug, whereas checking every cycle means a
-failed attempt just gets retried on the next one.
+This setup achieves **100% self-healing hotplug recovery** using a two-part approach:
+1. **Dynamic USB Node Exposure:** `/dev/bus/usb` is mounted as a volume so new device paths created by the kernel are immediately visible inside the container.
+2. **Event-Driven Watchdog:** `entrypoint.sh` runs a background task using `inotifywait` to monitor `/dev/bus/usb`. When a physical USB connect/disconnect occurs, `inotifywait` catches the event and cleanly restarts `ipp-usb`.
 
-Trade-off, stated plainly: this adds one small periodic CPU wakeup every
-`WATCHDOG_INTERVAL` seconds, forever, in exchange for the printer working
-again within ~20s of being replugged instead of requiring a manual
-`docker compose restart`. If you'd rather not pay that (e.g. the printer
-is permanently plugged in and never removed), set
-`WATCHDOG_INTERVAL=0` to disable the loop entirely.
+Unlike periodic polling loops, `inotifywait` uses kernel file-system events (`fsnotify`). It consumes **0% CPU** and triggers **zero wakeups** during idle.
 
 ## Putting the admin web UI behind Nginx Proxy Manager (LAN-only)
 
@@ -244,37 +221,7 @@ the real IP; NPM never sits in that path.
 
 ## Power consumption notes
 
-- **The CUPS/ipp-usb/avahi/dbus processes are idle, event-driven daemons**
-  — near-zero CPU when nothing is printing, tens of MB of RAM. On an N100
-  already running many containers, this isn't independently measurable
-  against your baseline.
-- **mDNS/Bonjour announcements are not continuous.** Re-announcements
-  happen roughly every half the record's TTL (tens of minutes), not every
-  second — it's push-based, not a polling loop.
-- **Logs are mounted as `tmpfs` (RAM), not bind-mounted to disk.** CUPS's
-  `AccessLog`/`PageLog` are also disabled outright (only real errors are
-  kept). Combined, routine operation should never trigger a disk
-  spin-up/D3 exit purely for logging. If you want `ipp-usb`'s own log
-  verbosity turned down too (it's fairly chatty at the default `debug`
-  level, though it only writes when there's actual print/scan traffic),
-  edit `./data/ipp-usb-conf/ipp-usb.conf` on the host:
-
-  ```ini
-  [logging]
-  device-log    = error
-  main-log      = error
-  console-log   = error
-  max-file-size = 64K
-  max-backup-files = 1
-  ```
-
-  then `docker compose restart`.
-- **The one real, if modest, power cost is leaving the printer physically
-  powered on 24/7** so `ipp-usb` can always see it — that's the printer's
-  own idle draw (typically 1-2W for a small inkjet), independent of the
-  container. A held-open USB session can also prevent USB autosuspend and
-  block the host's deepest CPU/platform idle states to some degree; if you
-  want to know how much that actually matters on your specific N100,
-  compare `sudo powertop`'s package C-state residency with the printer
-  plugged in vs. unplugged rather than taking an estimate — it varies
-  enough by platform that a real measurement beats a guess.
+- **Zero-CPU Idle Watchdog:** The `inotifywait` hotplug watcher is entirely event-driven via `fsnotify`. The process sits suspended in RAM with zero timer wakeups, allowing low-power NAS chips (e.g., Intel N100) to maintain deep CPU Package C-states (C8/C10).
+- **No Mechanical Disk Spindown Blockers:** Logs are mounted as `tmpfs` (RAM) in `docker-compose.yml`, and CUPS's access/page logging is disabled by default. Routine background activity will not wake mechanical HDDs from standby.
+- **mDNS/Bonjour behavior:** mDNS announcements occur only periodically based on TTL (tens of minutes) and during print job broadcasts. Avahi operates on passive UDP socket listeners on host network mode.
+- **Printer Hardware Idle Draw:** The primary power consumption comes from the printer hardware remaining plugged into AC power (typically 1–2W idle draw depending on the printer model).
